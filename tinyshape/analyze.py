@@ -109,6 +109,7 @@ class Analysis:
       prev = self.pending.get(frame)
       if prev is not None and prev is not st: self.flush(frame, prev)
       self.pending[frame] = st
+    elif event == "exception": self.pending[frame] = None  # the statement didn't finish, its targets hold old values
     elif event == "return":
       prev = self.pending.pop(frame, None)
       if isinstance(prev, ast.Return) and prev.value is not None and not frame.f_code.co_name.startswith("<"):
@@ -132,9 +133,10 @@ class Analysis:
 
   # ---- entry points ----
   def eval_expr(self, expr:str, extra:dict|None=None):
+    g = {"Tensor": Tensor, "dtypes": dtypes} | self.g  # usable in annotations even if the file doesn't import them
     class Syms(dict):
       def __missing__(s, k):
-        if k in self.g or hasattr(builtins, k): raise KeyError(k)
+        if k in g or hasattr(builtins, k): raise KeyError(k)
         for v, n in self.sym.items():
           if n == k: return v
         while self.next_sentinel in self.names or any(self.next_sentinel % p == 0 for p in range(2, 101)): self.next_sentinel += 1
@@ -142,7 +144,7 @@ class Analysis:
         self.sym[v] = k
         return v
     ns = Syms(extra or {})
-    return eval(expr, self.g | {"Tensor": Tensor, "dtypes": dtypes}, ns)
+    return eval(expr, g, ns)
 
   def comments(self) -> dict[int, str]:
     out = {}
