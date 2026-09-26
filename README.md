@@ -11,6 +11,12 @@ class Mlp:
     return self.down_proj(gate*up) -> (BS, 1, emb_dim)
 ```
 
+Chained calls get a hint after each link, so you can follow the transform without assigning intermediates:
+
+```python
+    q: (BS, n_heads, T, head_dim) = x.reshape(B, T, n_heads, head_dim): (BS, T, n_heads, head_dim).transpose(1, 2): (BS, n_heads, T, head_dim).contiguous()
+```
+
 Shape errors show up as diagnostics on the failing line, e.g. `cannot dot (BS, T, 64) and (BS, 4, T, 16)`.
 
 ## How it works
@@ -61,7 +67,8 @@ Dims are printed the way you wrote the annotation:
     "initialization_options": {
       "python": "/path/to/.venv/bin/python",           // optional, python with tinygrad installed
       "server": "/path/to/tinyshape/tinyshape/server.py", // optional, run the checkout instead of the embedded copy
-      "nameDims": true                                   // optional, false never shows global names
+      "nameDims": true,                                  // optional, false never shows global names
+      "chainHints": true                                 // optional, false hides hints inside method chains
     }
   }
 }

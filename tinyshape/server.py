@@ -13,7 +13,7 @@ results: dict[str, list[dict]] = {}
 gens: dict[str, int] = {}
 procs: dict[str, subprocess.Popen] = {}
 state_lock = threading.Lock()
-opts = {"python": None, "nameDims": True}
+opts = {"python": None, "nameDims": True, "chainHints": True}
 client_refresh = False
 next_id = 0
 
@@ -50,7 +50,8 @@ def analyze(uri:str, gen:int):
       if results.pop(uri, None) is not None: publish(uri, [], [])
       return
     path = uri_path(uri)
-    env = os.environ | {"DEV": "NULL", "TINYSHAPE_NAME_DIMS": "1" if opts["nameDims"] else "0"}
+    env = os.environ | {"DEV": "NULL", "TINYSHAPE_NAME_DIMS": "1" if opts["nameDims"] else "0",
+                         "TINYSHAPE_CHAIN_HINTS": "1" if opts["chainHints"] else "0"}
     p = subprocess.Popen([find_python(path), ANALYZE, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          cwd=os.path.dirname(path), env=env)
     procs[uri] = p

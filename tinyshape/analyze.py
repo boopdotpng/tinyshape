@@ -8,7 +8,7 @@
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
-import ast, io, json, os, sys, tokenize, re, inspect, builtins, traceback
+import ast, copy, io, json, os, sys, tokenize, re, inspect, builtins, traceback
 os.environ.setdefault("DEV", "NULL")
 
 real_stdout = sys.stdout
@@ -226,11 +226,37 @@ class Analysis:
       if not req: raise e
       return C(*[0]*len(req))
 
+  # ---- chain hints ----
+  def instrument(self) -> ast.Module:
+    # wrap every link of a method chain, `a(x).b()[0].c()` -> `rec(0, rec(1, a(x)).b())[0].c()`, so its value can be
+    # recorded. the last link isn't wrapped, its shape shows on the assignment or return
+    tree, self.links = copy.deepcopy(self.tree), []
+    wrap = set()
+    for node in ast.walk(tree):
+      if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, (ast.Call, ast.Subscript, ast.BinOp)): wrap.add(id(node.value))
+    analysis = self
+    class Wrap(ast.NodeTransformer):
+      def visit(self, node):
+        node = super().visit(node)
+        if id(node) not in wrap: return node
+        analysis.links.append((node.end_lineno, node.end_col_offset))
+        call = ast.Call(ast.Name("__tinyshape_rec__", ast.Load()), [ast.Constant(len(analysis.links)-1), node], [])
+        return ast.copy_location(call, node)
+    return ast.fix_missing_locations(Wrap().visit(tree))
+
+  def rec(self, k:int, v):
+    if isinstance(v, Tensor): self.add_hint(*self.links[k], v)
+    return v
+
   def run(self):
     self.g = {"__name__": "__tinyshape__", "__file__": self.path, "__builtins__": builtins}
     self.names = {}
     sys.path.insert(0, os.path.dirname(self.path))
-    for st in self.tree.body:
+    tree = self.tree
+    if os.environ.get("TINYSHAPE_CHAIN_HINTS", "1") != "0":
+      tree = self.instrument()
+      self.g["__tinyshape_rec__"] = self.rec
+    for st in tree.body:
       try: self.run_traced(exec, compile(ast.Module([st], []), self.path, "exec"), self.g)
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")
     self.names = self.dim_names()
