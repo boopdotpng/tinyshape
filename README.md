@@ -11,7 +11,7 @@ class Mlp:
     return self.down_proj(gate*up) -> (BS, 1, emb_dim)
 ```
 
-Chained calls get a hint after each link, so you can follow the transform without assigning intermediates:
+Chained calls get a hint after each link that changes the shape, so you can follow the transform without assigning intermediates. Each shape appears once, right after the step that produced it; the final shape is on the variable:
 
 ```python
     q: (BS, n_heads, T, head_dim) = x.reshape(B, T, n_heads, head_dim): (BS, T, n_heads, head_dim).transpose(1, 2): (BS, n_heads, T, head_dim).contiguous()

@@ -228,25 +228,59 @@ class Analysis:
 
   # ---- chain hints ----
   def instrument(self) -> ast.Module:
-    # wrap every link of a method chain, `a(x).b()[0].c()` -> `rec(0, rec(1, a(x)).b())[0].c()`, so its value can be
-    # recorded. the last link isn't wrapped, its shape shows on the assignment or return
+    # wrap each link of a method chain like `a(x).b()[0].c()` so we can see its value, the value of its receiver, and the
+    # value of the step after it. every shape in the chain is shown once, after the link that produced it: a link that
+    # keeps its receiver's shape gets no hint, and neither does one whose shape carries on to the end of the chain,
+    # since that shape is already on the assignment or return
     tree, self.links = copy.deepcopy(self.tree), []
-    wrap = set()
+    self.link_vals: dict[int, list] = {}
+    self.link_recv: dict[int, list] = {}
+    self.link_next: dict[int, list] = {}
+    self.link_step: dict[int, int|None] = {}
+    links, recvs, nexts = {}, {}, {}  # id(link) -> k, id(receiver) -> [k], id(step after link) -> k
     for node in ast.walk(tree):
-      if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.value, (ast.Call, ast.Subscript, ast.BinOp)): wrap.add(id(node.value))
-    analysis = self
+      if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute): inner, step = node.func, node
+      elif isinstance(node, (ast.Attribute, ast.Subscript)): inner, step = node, node
+      else: continue
+      link = inner.value
+      if not isinstance(link, (ast.Call, ast.Subscript, ast.BinOp)) or id(link) in links: continue
+      k = links[id(link)] = len(self.links)
+      self.links.append((link.end_lineno, link.end_col_offset))
+      nexts[id(step)] = k
+      recv = link.func.value if isinstance(link, ast.Call) and isinstance(link.func, ast.Attribute) else link.value if isinstance(link, ast.Subscript) else None
+      if recv is not None: recvs.setdefault(id(recv), []).append(k)
+    for node in ast.walk(tree):
+      if id(node) in nexts: self.link_step[nexts[id(node)]] = links.get(id(node))
+    def wrap(fn:str, k:int, node):
+      return ast.copy_location(ast.Call(ast.Name(fn, ast.Load()), [ast.Constant(k), node], []), node)
     class Wrap(ast.NodeTransformer):
       def visit(self, node):
+        nid = id(node)
         node = super().visit(node)
-        if id(node) not in wrap: return node
-        analysis.links.append((node.end_lineno, node.end_col_offset))
-        call = ast.Call(ast.Name("__tinyshape_rec__", ast.Load()), [ast.Constant(len(analysis.links)-1), node], [])
-        return ast.copy_location(call, node)
+        for k in recvs.get(nid, []): node = wrap("__tinyshape_recv__", k, node)
+        if nid in nexts: node = wrap("__tinyshape_next__", nexts[nid], node)
+        if nid in links: node = wrap("__tinyshape_rec__", links[nid], node)
+        return node
     return ast.fix_missing_locations(Wrap().visit(tree))
 
-  def rec(self, k:int, v):
-    if isinstance(v, Tensor): self.add_hint(*self.links[k], v)
-    return v
+  def recorder(self, store:dict, pairs:bool):
+    def rec(k:int, v):
+      s = self.fmt(v, self.use_names)
+      item = (s, self.fmt(v, not self.use_names)) if pairs else s
+      if (pairs and s is None) or item in (seen := store.setdefault(k, [])): return v
+      seen.append(item)
+      return v
+    return rec
+
+  def chain_hints(self):
+    def reaches_end(k:int) -> bool:
+      shapes = [a for a, _ in self.link_vals.get(k, [])]
+      if shapes != self.link_next.get(k): return False
+      return (j := self.link_step.get(k)) is None or reaches_end(j)
+    for k, vals in self.link_vals.items():
+      if [a for a, _ in vals] == self.link_recv.get(k) or reaches_end(k): continue
+      labels = self.hints.setdefault(self.links[k], [])
+      labels.extend(p for p in vals if p not in labels)
 
   def run(self):
     self.g = {"__name__": "__tinyshape__", "__file__": self.path, "__builtins__": builtins}
@@ -255,12 +289,15 @@ class Analysis:
     tree = self.tree
     if os.environ.get("TINYSHAPE_CHAIN_HINTS", "1") != "0":
       tree = self.instrument()
-      self.g["__tinyshape_rec__"] = self.rec
+      self.g["__tinyshape_rec__"] = self.recorder(self.link_vals, True)
+      self.g["__tinyshape_recv__"] = self.recorder(self.link_recv, False)
+      self.g["__tinyshape_next__"] = self.recorder(self.link_next, False)
     for st in tree.body:
       try: self.run_traced(exec, compile(ast.Module([st], []), self.path, "exec"), self.g)
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")
     self.names = self.dim_names()
     for cls, fn, anns in self.entries(): self.run_entry(cls, fn, anns)
+    if hasattr(self, "link_vals"): self.chain_hints()
     hints = []
     for (line, col), labels in sorted(self.hints.items()):
       text = self.lines[line-1] if line-1 < len(self.lines) else ""
