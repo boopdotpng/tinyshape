@@ -54,8 +54,16 @@ class Analysis:
     names, rest = [], d
     for s, n in self.sym.items():
       while rest and rest % s == 0: names.append(n); rest //= s
+    if not names and (off := self.offset_dim(d)): return off
     if rest != 1 or not names: names.append(self.names.get(rest, str(rest)) if named else str(rest))
     return "*".join(names)
+
+  def offset_dim(self, d:int) -> str|None:
+    # k*T + c for small k and c, e.g. after pad or cat. sentinels are spaced so this is unambiguous
+    for s, n in self.sym.items():
+      for k in range(1, 9):
+        if 0 < abs(c := d - k*s) <= 64: return f"{n if k == 1 else f'{k}*{n}'}{c:+d}"
+    return None
 
   def fmt(self, v, named:bool) -> str|None:
     if isinstance(v, Tensor):
@@ -139,7 +147,9 @@ class Analysis:
         if k in g or hasattr(builtins, k): raise KeyError(k)
         for v, n in self.sym.items():
           if n == k: return v
-        while self.next_sentinel in self.names or any(self.next_sentinel % p == 0 for p in range(2, 101)): self.next_sentinel += 1
+        def ok(v): return (v not in self.names and all(v % p for p in range(2, 101)) and
+                           all(abs(k*v - j*u) > 200 for u in self.sym for k in range(1, 9) for j in range(1, 9)))
+        while not ok(self.next_sentinel): self.next_sentinel += 1
         v = self.next_sentinel; self.next_sentinel += 1
         self.sym[v] = k
         return v
@@ -196,14 +206,17 @@ class Analysis:
     snap = ({k: list(v) for k, v in self.hints.items()}, set(self.rets))
     try: self.run_traced(target, **kwargs)
     except Exception as e:
-      # inputs without a declared dtype are float; if that fails, retry them as int (e.g. token ids into nn.Embedding)
-      if not (retry := [n for n in shapes if n not in dts]): return self.report_exc(e, fn.lineno)
+      # inputs without a declared dtype are float; if that fails, retry with one of them as int (e.g. token ids
+      # into nn.Embedding, indices into gather), then all of them
+      undeclared = [n for n in shapes if n not in dts]
       failed = (self.hints, self.rets)
-      self.hints, self.rets = {k: list(v) for k, v in snap[0].items()}, set(snap[1])
-      try: self.run_traced(target, **(kwargs | {n: Tensor.empty(*shapes[n], dtype=dtypes.int) for n in retry}))
-      except Exception:
-        self.hints, self.rets = failed
-        self.report_exc(e, fn.lineno)
+      for ints in [[n] for n in undeclared] + ([undeclared] if len(undeclared) > 1 else []):
+        self.hints, self.rets = {k: list(v) for k, v in snap[0].items()}, set(snap[1])
+        try: self.run_traced(target, **(kwargs | {n: Tensor.empty(*shapes[n], dtype=dtypes.int) for n in ints}))
+        except Exception: continue
+        return
+      self.hints, self.rets = failed
+      self.report_exc(e, fn.lineno)
 
   def make_instance(self, C):
     try: return C()
