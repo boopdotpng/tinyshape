@@ -30,7 +30,7 @@ Put these comments at the top of a function body:
 | comment | meaning |
 |---|---|
 | `# x.shape = (BS, T, emb_dim)` | Input shape. Names that aren't module globals become symbolic dims. |
-| `# x.dtype = dtypes.int` | Input dtype. |
+| `# x.dtype = dtypes.int` | Input dtype. Usually not needed: inputs are float, and if the call fails they're retried as int, e.g. token ids into `nn.Embedding`. |
 | `# start_pos = 0` | Value for a non-tensor parameter. |
 | `# self = Block(3)` | How to build `self`. The default is `Cls()`, then `Cls(0, 0, ...)`. |
 

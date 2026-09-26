@@ -5,7 +5,7 @@
 #   def __call__(self, x: Tensor, start_pos: int) -> Tensor:
 #     # x.shape = (BS, T, emb_dim)        names that aren't module globals become symbolic dims
 #                                         hints use global names if the shape does, raw numbers if it's all literals
-#     # x.dtype = dtypes.int              optional
+#     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
 import ast, io, json, os, sys, tokenize, re, inspect, builtins, traceback
@@ -193,8 +193,17 @@ class Analysis:
           except Exception as e: return self.report_exc(e, fn.lineno, f"tinyshape: constructing {cls.name} failed, add `# self = {cls.name}(...)`: ")
         target = raw
     if target is None: return self.diag(fn.lineno, f"tinyshape: {fn.name} not found after executing module")
+    snap = ({k: list(v) for k, v in self.hints.items()}, set(self.rets))
     try: self.run_traced(target, **kwargs)
-    except Exception as e: self.report_exc(e, fn.lineno)
+    except Exception as e:
+      # inputs without a declared dtype are float; if that fails, retry them as int (e.g. token ids into nn.Embedding)
+      if not (retry := [n for n in shapes if n not in dts]): return self.report_exc(e, fn.lineno)
+      failed = (self.hints, self.rets)
+      self.hints, self.rets = {k: list(v) for k, v in snap[0].items()}, set(snap[1])
+      try: self.run_traced(target, **(kwargs | {n: Tensor.empty(*shapes[n], dtype=dtypes.int) for n in retry}))
+      except Exception:
+        self.hints, self.rets = failed
+        self.report_exc(e, fn.lineno)
 
   def make_instance(self, C):
     try: return C()
