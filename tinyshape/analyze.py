@@ -37,6 +37,8 @@ class Analysis:
     self.sym: dict[int, str] = {}  # sentinel value -> dim name
     self.next_sentinel = 10007
     self.linemap: dict[int, ast.stmt] = {}
+    self.spans: list[tuple[int,int]] = []  # line ranges of entry points
+    self.cur: tuple[int,int]|None = None  # span of the entry being run
     for node in ast.walk(self.tree):  # bfs, so inner statements overwrite outer ones
       if not isinstance(node, ast.stmt): continue
       body = getattr(node, "body", None)
@@ -77,11 +79,15 @@ class Analysis:
       return f"[{inner}]" if isinstance(v, list) else f"({inner})"
     return None
 
+  def foreign(self, line:int) -> bool:
+    # inside another entry point: that function's own comment decides its shapes, not whoever calls it
+    return any(a <= line <= b for a, b in self.spans if (a, b) != self.cur)
+
   def add_hint(self, line:int, col:int, v, ret:bool=False):
     if self.names is None:  # module level, names aren't known yet. copy lists, they may be appended to later
       v = list(v) if isinstance(v, list) else v
       return self.deferred.append(lambda: self.add_hint(line, col, v, ret))
-    if (s := self.fmt(v, self.use_names)) is None: return
+    if self.foreign(line) or (s := self.fmt(v, self.use_names)) is None: return
     s = (s, self.fmt(v, not self.use_names))
     self.rets.add((line, col)) if ret else None
     labels = self.hints.setdefault((line, col), [])
@@ -143,9 +149,15 @@ class Analysis:
   def report_exc(self, e:BaseException, fallback_line:int, prefix:str=""):
     line = fallback_line
     for fs in traceback.extract_tb(e.__traceback__):
-      if fs.filename == self.path and fs.lineno: line = fs.lineno
+      if fs.filename == self.path and fs.lineno and not self.foreign(fs.lineno): line = fs.lineno
     msg = f"{type(e).__name__}: {e}".strip()
-    for s, n in self.sym.items(): msg = re.sub(rf"\b{s}\b", n, msg)
+    used = []
+    for s, n in self.sym.items():
+      msg, k = re.subn(rf"\b{s}\b", n, msg)
+      if k: used.append(f"{n}={s}")
+    # a symbolic dim is a big stand-in number, which overruns fixed-size tables like rope or a kv cache
+    if used: msg += (f" ({used[0]} is a stand-in for an unknown size; if it indexes" if len(used) == 1 else
+                     f" ({', '.join(used)} are stand-ins for unknown sizes; if one indexes") + " a fixed-size table, give it a number in the shape comment)"
     self.diag(line, prefix + msg)
 
   # ---- entry points ----
@@ -285,6 +297,7 @@ class Analysis:
       if self.names is None:
         c = list(v) if isinstance(v, list) else v
         self.deferred.append(lambda: rec(k, c)); return v
+      if self.foreign(self.links[k][0]): return v
       s = self.fmt(v, self.use_names)
       item = (s, self.fmt(v, not self.use_names)) if pairs else s
       if (pairs and s is None) or item in (seen := store.setdefault(k, [])): return v
@@ -306,7 +319,8 @@ class Analysis:
     self.g = {"__name__": "__tinyshape__", "__file__": self.path, "__builtins__": builtins}
     self.names, self.deferred = None, []  # module-level hints are formatted once the globals are known
     sys.path.insert(0, os.path.dirname(self.path))
-    tree = self.tree
+    tree, entries = self.tree, list(self.entries())
+    self.spans = [(fn.lineno, fn.end_lineno) for _, fn, _ in entries]
     if os.environ.get("TINYSHAPE_CHAIN_HINTS", "1") != "0":
       tree = self.instrument()
       self.g["__tinyshape_rec__"] = self.recorder(self.link_vals, True)
@@ -317,7 +331,10 @@ class Analysis:
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")
     self.names = self.dim_names()
     for f in self.deferred: f()
-    for cls, fn, anns in self.entries(): self.run_entry(cls, fn, anns)
+    for cls, fn, anns in entries:
+      self.cur = (fn.lineno, fn.end_lineno)
+      self.run_entry(cls, fn, anns)
+    self.cur = None
     if hasattr(self, "link_vals"): self.chain_hints()
     hints = []
     for (line, col), labels in sorted(self.hints.items()):
