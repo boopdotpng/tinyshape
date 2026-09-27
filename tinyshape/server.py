@@ -15,6 +15,7 @@ procs: dict[str, subprocess.Popen] = {}
 state_lock = threading.Lock()
 opts = {"python": None, "nameDims": True, "chainHints": True}
 client_refresh = False
+root: str|None = None  # zed runs one server per worktree and can send every server the same file, so each only takes its own
 next_id = 0
 
 def send(msg:dict):
@@ -31,6 +32,7 @@ def request(method, params):
 def log(msg): notify("window/logMessage", {"type": 4, "message": f"tinyshape: {msg}"})
 
 def uri_path(uri:str) -> str: return urllib.parse.unquote(urllib.parse.urlparse(uri).path)
+def owned(uri:str) -> bool: return root is None or (uri_path(uri) + os.sep).startswith(root + os.sep)
 
 def publish(uri, hints, diags):
   with state_lock: results[uri] = hints
@@ -87,22 +89,25 @@ def inlay_hints(params):
           for h in hints if r["start"]["line"] <= h["line"] <= r["end"]["line"]]
 
 def handle(msg:dict):
-  global client_refresh
+  global client_refresh, root
   method, params, mid = msg.get("method"), msg.get("params") or {}, msg.get("id")
   if method is None: return  # response to one of our requests
   result = None
   if method == "initialize":
+    if (r := params.get("rootUri") or params.get("rootPath")): root = os.path.normpath(uri_path(r) if "://" in r else r)
     client_refresh = bool(params.get("capabilities", {}).get("workspace", {}).get("inlayHint", {}).get("refreshSupport"))
     opts.update({k: v for k, v in (params.get("initializationOptions") or {}).items() if v is not None})
-    log(f"server {__file__} on {sys.executable}, options {opts}, extension settings: {os.environ.get('TINYSHAPE_SETTINGS', '-')}")
+    log(f"server {__file__} on {sys.executable}, root {root}, options {opts}, extension settings: {os.environ.get('TINYSHAPE_SETTINGS', '-')}")
     result = {"capabilities": {"textDocumentSync": {"openClose": True, "change": 1, "save": False}, "inlayHintProvider": True},
               "serverInfo": {"name": "tinyshape"}}
   elif method == "shutdown": result = None
   elif method == "exit": os._exit(0)
   elif method == "textDocument/didOpen":
-    td = params["textDocument"]; docs[td["uri"]] = td["text"]; schedule(td["uri"])
+    td = params["textDocument"]
+    if owned(td["uri"]): docs[td["uri"]] = td["text"]; schedule(td["uri"])
   elif method == "textDocument/didChange":
-    uri = params["textDocument"]["uri"]; docs[uri] = params["contentChanges"][-1]["text"]; schedule(uri)
+    uri = params["textDocument"]["uri"]
+    if owned(uri): docs[uri] = params["contentChanges"][-1]["text"]; schedule(uri)
   elif method == "textDocument/didClose":
     uri = params["textDocument"]["uri"]
     with state_lock: docs.pop(uri, None); results.pop(uri, None); gens[uri] = gens.get(uri, 0) + 1
