@@ -6,7 +6,7 @@
 #     # x.shape = (BS, T, emb_dim)        names that aren't module globals become symbolic dims
 #                                         hints use global names if the shape does, raw numbers if it's all literals
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
-#     # start_pos = 0                     plain values for non-tensor params
+#     # start_pos = 0                     plain values for non-tensor params, int/float/bool ones default to 0
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
 #   def rope_table():
 #     # tinyshape: run                    run a function that has no shapes to declare
@@ -214,6 +214,12 @@ class Analysis:
           except Exception as e: return self.report_exc(e, fn.lineno, f"tinyshape: constructing {cls.name} failed, add `# self = {cls.name}(...)`: ")
         target = raw
     if target is None: return self.diag(fn.lineno, f"tinyshape: {fn.name} not found after executing module")
+    # required params with no annotation comment: scalars get a zero, anything else needs a comment
+    for p in inspect.signature(target).parameters.values():
+      if p.name in kwargs or p.default is not p.empty or p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD): continue
+      zero = {t: t() for t in (int, float, bool)} | {t.__name__: t() for t in (int, float, bool)}
+      if p.annotation in zero: kwargs[p.name] = zero[p.annotation]
+      else: return self.diag(fn.lineno, f"tinyshape: no value for `{p.name}`, add `# {p.name}.shape = (...)` or `# {p.name} = ...`")
     snap = ({k: list(v) for k, v in self.hints.items()}, set(self.rets))
     try: self.run_traced(target, **kwargs)
     except Exception as e:
