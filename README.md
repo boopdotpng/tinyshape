@@ -39,6 +39,9 @@ Put these comments at the top of a function body:
 | `# x.dtype = dtypes.int` | Input dtype. Usually not needed: inputs are float, and if the call fails they're retried as int, e.g. token ids into `nn.Embedding`. |
 | `# start_pos = 0` | Value for a non-tensor parameter. |
 | `# self = Block(3)` | How to build `self`. The default is `Cls()`, then `Cls(0, 0, ...)`. |
+| `# tinyshape: run` | Run this function even though it has no input shapes, e.g. a `def rope_table():` that builds tensors from globals. |
+
+Code only gets hints if it runs: in an annotated function, in anything it calls, or at module level. A function that nothing calls needs `# tinyshape: run`.
 
 Dims are printed the way you wrote the annotation:
 
@@ -49,7 +52,7 @@ Dims are printed the way you wrote the annotation:
 
 ## Caveats
 
-- **It runs your code.** Module-level code runs on every edit, with `__name__ != "__main__"`. Only files containing a `# name.shape =` comment are analyzed, and each run has a 20s timeout.
+- **It runs your code.** Module-level code runs on every edit, with `__name__ != "__main__"`. Only files containing a `# name.shape =` or `# tinyshape: run` comment are analyzed, and each run has a 20s timeout.
 - **Only the branch that ran is seen.** Shapes come from one real run, so a different branch can give different shapes.
 - **Tensors only.** Hints are shown for tensors and for small lists or tuples of tensors.
 

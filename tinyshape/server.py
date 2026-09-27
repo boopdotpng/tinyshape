@@ -1,10 +1,10 @@
 # minimal stdio language server: inlay hints with tinygrad tensor shapes, diagnostics for shape errors.
 # the actual work happens in analyze.py, run in a fresh subprocess per edit (user code is executed!).
-# only files containing a `# <name>.shape = (...)` comment are analyzed.
+# only files containing a `# <name>.shape = (...)` or `# tinyshape: run` comment are analyzed.
 import json, os, re, subprocess, sys, threading, urllib.parse
 
 ANALYZE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analyze.py")
-TRIGGER = re.compile(r"#\s*\w+\.shape\s*=")
+TRIGGER = re.compile(r"#\s*(\w+\.shape\s*=|tinyshape:\s*run\b)")
 DEBOUNCE, TIMEOUT = 0.3, 20.0
 
 out_lock = threading.Lock()

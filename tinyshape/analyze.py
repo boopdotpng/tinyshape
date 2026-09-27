@@ -8,6 +8,8 @@
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
+#   def rope_table():
+#     # tinyshape: run                    run a function that has no shapes to declare
 import ast, copy, io, json, os, sys, tokenize, re, inspect, builtins, traceback
 os.environ.setdefault("DEV", "NULL")
 
@@ -17,6 +19,7 @@ sys.stdout = sys.stderr  # user prints must not corrupt the json
 from tinygrad import Tensor, dtypes
 
 ANN_RE = re.compile(r"#\s*([A-Za-z_]\w*)(\.shape|\.dtype)?\s*=\s*(.+?)\s*$")
+RUN_RE = re.compile(r"#\s*tinyshape:\s*run\b")
 
 def utf16_col(line:str, byte_col:int) -> int:
   s = line.encode()[:byte_col].decode(errors="ignore")
@@ -75,6 +78,9 @@ class Analysis:
     return None
 
   def add_hint(self, line:int, col:int, v, ret:bool=False):
+    if self.names is None:  # module level, names aren't known yet. copy lists, they may be appended to later
+      v = list(v) if isinstance(v, list) else v
+      return self.deferred.append(lambda: self.add_hint(line, col, v, ret))
     if (s := self.fmt(v, self.use_names)) is None: return
     s = (s, self.fmt(v, not self.use_names))
     self.rets.add((line, col)) if ret else None
@@ -172,14 +178,16 @@ class Analysis:
     for node in self.tree.body:
       fns = [(None, node)] if isinstance(node, ast.FunctionDef) else [(node, n) for n in node.body if isinstance(n, ast.FunctionDef)] if isinstance(node, ast.ClassDef) else []
       for cls, fn in fns:
-        anns = [(l, m.groups()) for l, c in leading(fn) if (m := ANN_RE.match(c))]
+        lead = leading(fn)
+        anns = [(l, m.groups()) for l, c in lead if (m := ANN_RE.match(c))]
         params = [a.arg for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs]
         anns = [(l, g) for l, g in anns if g[0] in params]
-        if any(g[1] == ".shape" for _, g in anns): yield cls, fn, anns
+        if any(g[1] == ".shape" for _, g in anns) or any(RUN_RE.match(c) for _, c in lead): yield cls, fn, anns
 
   def run_entry(self, cls:ast.ClassDef|None, fn:ast.FunctionDef, anns):
     shapes, dts, vals = {}, {}, {}
-    self.use_names = any(isinstance(n, ast.Name) and type(self.g.get(n.id)) is int
+    # with no declared shapes there's no style to follow, so use names
+    self.use_names = not any(kind == ".shape" for _, (_, kind, _) in anns) or any(isinstance(n, ast.Name) and type(self.g.get(n.id)) is int
                          for l, (_, kind, expr) in anns if kind == ".shape" for n in ast.walk(ast.parse(expr, mode="eval")))
     for l, (name, kind, expr) in anns:
       try:
@@ -265,6 +273,9 @@ class Analysis:
 
   def recorder(self, store:dict, pairs:bool):
     def rec(k:int, v):
+      if self.names is None:
+        c = list(v) if isinstance(v, list) else v
+        self.deferred.append(lambda: rec(k, c)); return v
       s = self.fmt(v, self.use_names)
       item = (s, self.fmt(v, not self.use_names)) if pairs else s
       if (pairs and s is None) or item in (seen := store.setdefault(k, [])): return v
@@ -284,7 +295,7 @@ class Analysis:
 
   def run(self):
     self.g = {"__name__": "__tinyshape__", "__file__": self.path, "__builtins__": builtins}
-    self.names = {}
+    self.names, self.deferred = None, []  # module-level hints are formatted once the globals are known
     sys.path.insert(0, os.path.dirname(self.path))
     tree = self.tree
     if os.environ.get("TINYSHAPE_CHAIN_HINTS", "1") != "0":
@@ -296,6 +307,7 @@ class Analysis:
       try: self.run_traced(exec, compile(ast.Module([st], []), self.path, "exec"), self.g)
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")
     self.names = self.dim_names()
+    for f in self.deferred: f()
     for cls, fn, anns in self.entries(): self.run_entry(cls, fn, anns)
     if hasattr(self, "link_vals"): self.chain_hints()
     hints = []
