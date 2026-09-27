@@ -17,6 +17,8 @@ Chained calls get a hint after each link that changes the shape, so you can foll
     q: (BS, n_heads, T, head_dim) = x.reshape(B, T, n_heads, head_dim): (BS, T, n_heads, head_dim).transpose(1, 2): (BS, n_heads, T, head_dim).contiguous()
 ```
 
+`return a, b` gets a hint after each element instead of one for the whole tuple.
+
 Shape errors show up as diagnostics on the failing line, e.g. `cannot dot (BS, T, 64) and (BS, 4, T, 16)`.
 
 ## How it works

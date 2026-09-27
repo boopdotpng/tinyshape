@@ -127,7 +127,10 @@ class Analysis:
     elif event == "return":
       prev = self.pending.pop(frame, None)
       if isinstance(prev, ast.Return) and prev.value is not None and not frame.f_code.co_name.startswith("<"):
-        self.add_hint(prev.end_lineno, prev.end_col_offset, arg, ret=True)
+        elts = prev.value.elts if isinstance(prev.value, ast.Tuple) else None
+        if elts and isinstance(arg, tuple) and len(arg) == len(elts) and not any(isinstance(e, ast.Starred) for e in elts):
+          for e, v in zip(elts, arg): self.add_hint(e.end_lineno, e.end_col_offset, v)  # `return a, b` gets a hint on each
+        else: self.add_hint(prev.end_lineno, prev.end_col_offset, arg, ret=True)
       elif prev is not None: self.flush(frame, prev)
     return self.local_trace
 
