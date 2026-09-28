@@ -17,6 +17,16 @@ real_stdout = sys.stdout
 sys.stdout = sys.stderr  # user prints must not corrupt the json
 
 from tinygrad import Tensor, dtypes
+from tinygrad.helpers import argfix
+
+# random init builds and realizes an rng graph per tensor (most of the time for a big model's __init__), but only
+# shapes matter here, so every random constructor makes an empty tensor instead
+def _empty_like_rand(default):
+  def f(cls, *shape, dtype=None, device=None, **_): return Tensor.empty(*argfix(*shape), dtype=dtype or default, device=device)
+  return classmethod(f)
+for _n in ["rand", "randn", "uniform", "normal", "scaled_uniform", "glorot_uniform", "kaiming_uniform", "kaiming_normal"]:
+  setattr(Tensor, _n, _empty_like_rand(dtypes.default_float))
+Tensor.randint = _empty_like_rand(dtypes.int32)
 
 ANN_RE = re.compile(r"#\s*([A-Za-z_]\w*)(\.shape|\.dtype)?\s*=\s*(.+?)\s*$")
 RUN_RE = re.compile(r"#\s*tinyshape:\s*run\b")
@@ -236,15 +246,18 @@ class Analysis:
     try: self.run_traced(target, **kwargs)
     except Exception as e:
       # inputs without a declared dtype are float; if that fails, retry with one of them as int (e.g. token ids
-      # into nn.Embedding, indices into gather), then all of them
+      # into nn.Embedding, indices into gather), then all of them. if every attempt fails, report the one that got
+      # furthest (most hints), so a later bug isn't hidden behind the float input's error
       undeclared = [n for n in shapes if n not in dts]
-      failed = (self.hints, self.rets)
+      best = (self.hints, self.rets, e)
       for ints in [[n] for n in undeclared] + ([undeclared] if len(undeclared) > 1 else []):
         self.hints, self.rets = {k: list(v) for k, v in snap[0].items()}, set(snap[1])
         try: self.run_traced(target, **(kwargs | {n: Tensor.empty(*shapes[n], dtype=dtypes.int) for n in ints}))
-        except Exception: continue
+        except Exception as e2:
+          if sum(map(len, self.hints.values())) > sum(map(len, best[0].values())): best = (self.hints, self.rets, e2)
+          continue
         return
-      self.hints, self.rets = failed
+      self.hints, self.rets, e = best
       self.report_exc(e, fn.lineno)
 
   def make_instance(self, C):
