@@ -4,7 +4,7 @@
 # entry points are functions whose leading comments declare input shapes:
 #   def __call__(self, x: Tensor, start_pos: int) -> Tensor:
 #     # x.shape = (BS, T, emb_dim)        names that aren't module globals become symbolic dims
-#                                         hints show a dim by global name if exactly one global has its value, else as a number
+#                                         hints show numbers, the hover shows a dim by global name if exactly one global has its value
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params, int/float/bool ones default to 0
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
@@ -79,12 +79,12 @@ class Analysis:
         if 0 < abs(c := d - k*s) <= 64: return f"{n if k == 1 else f'{k}*{n}'}{c:+d}"
     return None
 
-  def fmt(self, v, named:bool) -> str|None:
+  def fmt(self, v, named:bool, dtype:bool=False) -> str|None:
     if isinstance(v, Tensor):
       s = "(" + ", ".join(self.fmt_dim(d, named) for d in v.shape) + ("," if len(v.shape) == 1 else "") + ")"
-      return s if named or v.dtype == dtypes.default_float else f"{s} {v.dtype.name}"  # dtype only in the hover form
+      return s if not dtype or v.dtype == dtypes.default_float else f"{s} {v.dtype.name}"
     if isinstance(v, (list, tuple)) and 0 < len(v) <= 4 and all(isinstance(x, Tensor) for x in v):
-      inner = ", ".join(self.fmt(x, named) for x in v)
+      inner = ", ".join(self.fmt(x, named, dtype) for x in v)
       return f"[{inner}]" if isinstance(v, list) else f"({inner})"
     return None
 
@@ -96,8 +96,9 @@ class Analysis:
     if self.names is None:  # module level, names aren't known yet. copy lists, they may be appended to later
       v = list(v) if isinstance(v, list) else v
       return self.deferred.append(lambda: self.add_hint(line, col, v, ret))
-    if self.foreign(line) or (s := self.fmt(v, True)) is None: return
-    s = (s, self.fmt(v, False))
+    # the label is plain numbers (the code already names them), the hover has global names and the dtype
+    if self.foreign(line) or (s := self.fmt(v, False)) is None: return
+    s = (s, self.fmt(v, True, dtype=True))
     self.rets.add((line, col)) if ret else None
     labels = self.hints.setdefault((line, col), [])
     if s not in labels: labels.append(s)
@@ -307,8 +308,8 @@ class Analysis:
         c = list(v) if isinstance(v, list) else v
         self.deferred.append(lambda: rec(k, c)); return v
       if self.foreign(self.links[k][0]): return v
-      s = self.fmt(v, True)
-      item = (s, self.fmt(v, False)) if pairs else s
+      s = self.fmt(v, False)
+      item = (s, self.fmt(v, True, dtype=True)) if pairs else s
       if (pairs and s is None) or item in (seen := store.setdefault(k, [])): return v
       seen.append(item)
       return v

@@ -47,9 +47,8 @@ Code only gets hints if it runs: in an annotated function, in anything it calls,
 
 Dims are printed the same way everywhere:
 
-- A dim equal to exactly one module-level int is shown by that name, e.g. `(1, 1, mlp_size)`, whether the annotation used names or numbers.
-- Any other dim is shown as a number, including one whose value several globals share.
-- Hovering a hint shows it in plain numbers, with the dtype if it isn't the default float.
+- Dims are numbers, e.g. `(1, 1, 17408)`, since the code already says which globals they come from. Symbolic dims keep their names: `(BS, T, 5120)`.
+- Hovering a hint shows a dim by name when exactly one module-level int has its value, e.g. `(1, 1, mlp_size)`, plus the dtype if it isn't the default float.
 - If a line runs with several shapes (loops, several callers), the hint shows the first and the hover lists the others.
 
 ## Caveats
