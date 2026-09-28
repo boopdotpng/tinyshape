@@ -325,6 +325,21 @@ class Analysis:
       labels = self.hints.setdefault(self.links[k], [])
       labels.extend(p for p in vals if p not in labels)
 
+  def fill_stubs(self, tree:ast.Module) -> ast.Module:
+    # a `-> Tensor` function whose body is only `pass` or `...` hasn't been written yet. it returns its first Tensor
+    # param, so whatever calls it still runs and gets hints instead of failing on None
+    def is_tensor(a): return (isinstance(a, ast.Name) and a.id == "Tensor") or (isinstance(a, ast.Attribute) and a.attr == "Tensor") or \
+                             (isinstance(a, ast.Constant) and a.value == "Tensor")
+    for fn in ast.walk(tree):
+      if not isinstance(fn, ast.FunctionDef) or not is_tensor(fn.returns): continue
+      body = fn.body[1:] if fn.body and isinstance(fn.body[0], ast.Expr) and isinstance(fn.body[0].value, ast.Constant) and isinstance(fn.body[0].value.value, str) else fn.body
+      if not body or not all(isinstance(b, ast.Pass) or (isinstance(b, ast.Expr) and isinstance(b.value, ast.Constant) and b.value.value is ...) for b in body): continue
+      arg = next((a for a in fn.args.posonlyargs + fn.args.args + fn.args.kwonlyargs if is_tensor(a.annotation)), None)
+      if arg is None: continue
+      fn.body = [ast.copy_location(ast.Return(ast.Name(arg.arg, ast.Load())), body[0])]
+      self.diag(body[0].lineno, f"tinyshape: stub, returns `{arg.arg}` unchanged", severity=4)
+    return ast.fix_missing_locations(tree)
+
   def run(self):
     self.g = {"__name__": "__tinyshape__", "__file__": self.path, "__builtins__": builtins}
     self.names, self.deferred = None, []  # module-level hints are formatted once the globals are known
@@ -336,6 +351,7 @@ class Analysis:
       self.g["__tinyshape_rec__"] = self.recorder(self.link_vals, True)
       self.g["__tinyshape_recv__"] = self.recorder(self.link_recv, False)
       self.g["__tinyshape_next__"] = self.recorder(self.link_next, False)
+    tree = self.fill_stubs(tree if tree is not self.tree else copy.deepcopy(tree))
     for st in tree.body:
       try: self.run_traced(exec, compile(ast.Module([st], []), self.path, "exec"), self.g)
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")

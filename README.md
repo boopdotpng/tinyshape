@@ -45,6 +45,8 @@ Put these comments at the top of a function body:
 
 Code only gets hints if it runs: in an annotated function, in anything it calls, or at module level. A function that nothing calls needs `# tinyshape: run`.
 
+A `-> Tensor` function whose body is only `pass` or `...` returns its first `Tensor` argument unchanged, so code that calls an unfinished layer still runs and gets hints.
+
 Dims are printed the same way everywhere:
 
 - Dims are numbers, e.g. `(1, 1, 17408)`, since the code already says which globals they come from. Symbolic dims keep their names: `(BS, T, 5120)`.
