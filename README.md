@@ -92,6 +92,22 @@ Notes:
 - **Updates:** the extension embeds a copy of the Python files. With `server` pointing at a checkout, Python edits only need `editor: restart language server`. Otherwise run `zed: rebuild dev extension`. If the server doesn't come back after a rebuild, restart Zed.
 - **basedpyright** shows its own `: Tensor` hint next to tinyshape's. It can't be turned off for tensors only, just for all variables with `basedpyright.analysis.inlayHints.variableTypes: false`.
 
+## VS Code
+
+1. Download `tinyshape-<version>.vsix` from the [releases](https://github.com/boopdotpng/tinyshape/releases) and run `code --install-extension tinyshape-<version>.vsix`, or use `Extensions: Install from VSIX...`.
+2. Optionally set these in `settings.json`:
+
+```jsonc
+"tinyshape.python": "/path/to/.venv/bin/python",           // python with tinygrad installed
+"tinyshape.server": "/path/to/tinyshape/tinyshape/server.py", // run the checkout instead of the bundled copy
+"tinyshape.nameDims": true,                                  // false never shows global names
+"tinyshape.chainHints": true                                 // false hides hints inside method chains
+```
+
+Python is chosen the same way as in Zed, with `python3` from `PATH` running the server when `tinyshape.python` isn't set. Changing a setting restarts the server; `tinyshape: Restart Server` does it by hand, e.g. after editing a checkout's `server.py`. Server logs are in the `tinyshape` output channel.
+
+To build the `.vsix` yourself: `cd vscode && npm install && npx vsce package`. This bundles a copy of the Python files from `tinyshape/`.
+
 ## Other editors
 
 `tinyshape/server.py` is a plain stdio LSP server with no dependencies beyond the standard library. It provides inlay hints and diagnostics, so any editor that can run a custom language server for Python should work:
