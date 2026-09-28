@@ -2,24 +2,77 @@
   "name": "tinyshape",
   "displayName": "tinyshape",
   "description": "Inlay hints with tinygrad tensor shapes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "boopdotpng",
   "author": "anu",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/boopdotpng/tinyshape" },
-  "engines": { "vscode": "^1.82.0" },
-  "categories": ["Programming Languages"],
-  "activationEvents": ["onLanguage:python"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/boopdotpng/tinyshape"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:python"
+  ],
   "main": "./extension.js",
   "contributes": {
-    "commands": [{ "command": "tinyshape.restart", "title": "tinyshape: Restart Server" }],
+    "commands": [
+      {
+        "command": "tinyshape.restart",
+        "title": "tinyshape: Restart Server"
+      },
+      {
+        "command": "tinyshape.setTinygradFolder",
+        "title": "tinyshape: Set tinygrad Folder"
+      }
+    ],
     "configuration": {
       "title": "tinyshape",
       "properties": {
-        "tinyshape.python": { "type": ["string", "null"], "default": null, "scope": "resource", "description": "Python with tinygrad installed. Unset: the nearest .venv/bin/python above the file, else python3 from PATH." },
-        "tinyshape.server": { "type": ["string", "null"], "default": null, "scope": "resource", "description": "Path to a checkout's tinyshape/server.py, run instead of the bundled copy." },
-        "tinyshape.nameDims": { "type": "boolean", "default": true, "scope": "resource", "description": "Show dims by global name in the hover. false never shows global names." },
-        "tinyshape.chainHints": { "type": "boolean", "default": true, "scope": "resource", "description": "Show hints inside method chains." }
+        "tinyshape.python": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "resource",
+          "description": "Python with tinygrad installed. Unset: the interpreter selected in the Python extension, else the nearest .venv/bin/python above the file, else python3 from PATH."
+        },
+        "tinyshape.tinygradPath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "resource",
+          "description": "Folder of a tinygrad git clone, for when tinygrad isn't pip installed. Added to PYTHONPATH for the analysis."
+        },
+        "tinyshape.server": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "scope": "resource",
+          "description": "Path to a checkout's tinyshape/server.py, run instead of the bundled copy."
+        },
+        "tinyshape.nameDims": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show dims by global name in the hover. false never shows global names."
+        },
+        "tinyshape.chainHints": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Show hints inside method chains."
+        }
       }
     }
   },
@@ -27,6 +80,10 @@
     "vscode:prepublish": "mkdir -p server && cp ../tinyshape/server.py ../tinyshape/analyze.py server/",
     "package": "vsce package"
   },
-  "dependencies": { "vscode-languageclient": "^9.0.1" },
-  "devDependencies": { "@vscode/vsce": "^3.2.0" }
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.2.0"
+  }
 }

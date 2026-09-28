@@ -72,6 +72,7 @@ Dims are printed the same way everywhere:
   "tinyshape": {
     "initialization_options": {
       "python": "/path/to/.venv/bin/python",           // optional, python with tinygrad installed
+      "tinygradPath": "/path/to/tinygrad",               // optional, a tinygrad git clone, if it isn't pip installed
       "server": "/path/to/tinyshape/tinyshape/server.py", // optional, run the checkout instead of the embedded copy
       "nameDims": true,                                  // optional, false never shows global names
       "chainHints": true                                 // optional, false hides hints inside method chains
@@ -95,16 +96,22 @@ Notes:
 ## VS Code
 
 1. Download `tinyshape-<version>.vsix` from the [releases](https://github.com/boopdotpng/tinyshape/releases) and run `code --install-extension tinyshape-<version>.vsix`, or use `Extensions: Install from VSIX...`.
-2. Optionally set these in `settings.json`:
+2. Open a Python file with a `# x.shape = (...)` comment. If tinygrad is installed in the interpreter you picked with `Python: Select Interpreter`, hints show up and you're done.
+3. If tinyshape can't find tinygrad, it shows a popup with two fixes:
+   - **Set tinygrad Folder...**: pick the folder you cloned tinygrad into, the one with `setup.py` in it. This is saved for every project. It can also be run from the command palette as `tinyshape: Set tinygrad Folder`.
+   - **Select Python Interpreter**: pick a Python that has tinygrad installed, e.g. after `pip install tinygrad`.
+
+All settings, for `settings.json`:
 
 ```jsonc
 "tinyshape.python": "/path/to/.venv/bin/python",           // python with tinygrad installed
+"tinyshape.tinygradPath": "/path/to/tinygrad",              // a tinygrad git clone, if it isn't pip installed
 "tinyshape.server": "/path/to/tinyshape/tinyshape/server.py", // run the checkout instead of the bundled copy
 "tinyshape.nameDims": true,                                  // false never shows global names
 "tinyshape.chainHints": true                                 // false hides hints inside method chains
 ```
 
-Python is chosen the same way as in Zed, with `python3` from `PATH` running the server when `tinyshape.python` isn't set. Changing a setting restarts the server; `tinyshape: Restart Server` does it by hand, e.g. after editing a checkout's `server.py`. Server logs are in the `tinyshape` output channel.
+The Python for the analysis is `tinyshape.python` if set, else the interpreter selected in the Python extension, else it's chosen the same way as in Zed, with `python3` from `PATH` running the server. Changing a setting or the selected interpreter restarts the server; `tinyshape: Restart Server` does it by hand, e.g. after editing a checkout's `server.py`. Server logs are in the `tinyshape` output channel.
 
 To build the `.vsix` yourself: `cd vscode && npm install && npx vsce package`. This bundles a copy of the Python files from `tinyshape/`.
 

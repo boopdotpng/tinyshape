@@ -16,7 +16,11 @@ os.environ.setdefault("DEV", "NULL")
 real_stdout = sys.stdout
 sys.stdout = sys.stderr  # user prints must not corrupt the json
 
-from tinygrad import Tensor, dtypes
+try: from tinygrad import Tensor, dtypes
+except ModuleNotFoundError as e:
+  if e.name != "tinygrad": raise
+  real_stdout.write(json.dumps({"missing_tinygrad": True, "python": sys.executable}))
+  sys.exit(0)
 from tinygrad.helpers import argfix
 
 # random init builds and realizes an rng graph per tensor (most of the time for a big model's __init__), but only

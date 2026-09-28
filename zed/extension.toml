@@ -1,6 +1,6 @@
 id = "tinyshape"
 name = "tinyshape"
-version = "0.1.0"
+version = "0.2.0"
 schema_version = 1
 authors = ["anu"]
 description = "Inlay hints with tinygrad tensor shapes"

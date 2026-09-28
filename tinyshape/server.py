@@ -13,7 +13,8 @@ results: dict[str, list[dict]] = {}
 gens: dict[str, int] = {}
 procs: dict[str, subprocess.Popen] = {}
 state_lock = threading.Lock()
-opts = {"python": None, "nameDims": True, "chainHints": True}
+opts = {"python": None, "tinygradPath": None, "nameDims": True, "chainHints": True}
+warned_missing = False  # the missing-tinygrad notice is sent once per server
 client_refresh = False
 root: str|None = None  # zed runs one server per worktree and can send every server the same file, so each only takes its own
 next_id = 0
@@ -54,6 +55,7 @@ def analyze(uri:str, gen:int):
     path = uri_path(uri)
     env = os.environ | {"DEV": "NULL", "TINYSHAPE_NAME_DIMS": "1" if opts["nameDims"] else "0",
                          "TINYSHAPE_CHAIN_HINTS": "1" if opts["chainHints"] else "0"}
+    if (tg := tinygrad_root()): env["PYTHONPATH"] = os.pathsep.join(filter(None, [tg, env.get("PYTHONPATH")]))
     p = subprocess.Popen([find_python(path), ANALYZE, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          cwd=os.path.dirname(path), env=env)
     procs[uri] = p
@@ -67,7 +69,24 @@ def analyze(uri:str, gen:int):
   try: res = json.loads(stdout)
   except json.JSONDecodeError: return log(f"analysis failed (exit {p.returncode}):\n{stderr.decode(errors='replace')[-4000:]}")
   if res.get("syntax_error"): return  # keep old hints while typing
+  if res.get("missing_tinygrad"): return missing_tinygrad(res["python"])
   publish(uri, res["hints"], res["diagnostics"])
+
+def tinygrad_root() -> str|None:
+  # `tinygradPath` is a checkout: the repo root, or the tinygrad/ package inside it
+  if not (p := opts["tinygradPath"]): return None
+  p = os.path.normpath(os.path.expanduser(p))
+  return os.path.dirname(p) if os.path.exists(os.path.join(p, "__init__.py")) else p
+
+def missing_tinygrad(python:str):
+  global warned_missing
+  where = f"in {opts['tinygradPath']}" if opts["tinygradPath"] else f"for {python}"
+  log(f"tinygrad not found {where}. set `python` to a python with tinygrad installed, or `tinygradPath` to a tinygrad checkout")
+  with state_lock:
+    if warned_missing: return
+    warned_missing = True
+  # the vscode extension turns this into a prompt, other clients ignore it
+  notify("tinyshape/missingTinygrad", {"python": python, "tinygradPath": opts["tinygradPath"]})
 
 def find_python(path:str) -> str:
   # explicit option, else the nearest .venv above the file, else whatever runs this server
