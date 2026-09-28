@@ -45,12 +45,12 @@ Put these comments at the top of a function body:
 
 Code only gets hints if it runs: in an annotated function, in anything it calls, or at module level. A function that nothing calls needs `# tinyshape: run`.
 
-Dims are printed the way you wrote the annotation:
+Dims are printed the same way everywhere:
 
-- If it names a module-level int, like `(1, 1, emb_dim)`, a dim equal to exactly one module-level int is shown by name: `(1, 1, mlp_size)`.
-- If it's all numbers, like `(1, 1, 5120)`, numbers are shown: `(1, 1, 17408)`.
-- Hovering a hint shows the other form.
-- If a line runs with several shapes (loops, several callers), they're joined with `|`.
+- A dim equal to exactly one module-level int is shown by that name, e.g. `(1, 1, mlp_size)`, whether the annotation used names or numbers.
+- Any other dim is shown as a number, including one whose value several globals share.
+- Hovering a hint shows it in plain numbers, with the dtype if it isn't the default float.
+- If a line runs with several shapes (loops, several callers), the hint shows the first and the hover lists the others.
 
 ## Caveats
 

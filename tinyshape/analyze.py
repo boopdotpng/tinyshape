@@ -4,7 +4,7 @@
 # entry points are functions whose leading comments declare input shapes:
 #   def __call__(self, x: Tensor, start_pos: int) -> Tensor:
 #     # x.shape = (BS, T, emb_dim)        names that aren't module globals become symbolic dims
-#                                         hints use global names if the shape does, raw numbers if it's all literals
+#                                         hints show a dim by global name if exactly one global has its value, else as a number
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params, int/float/bool ones default to 0
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
@@ -41,7 +41,6 @@ class Analysis:
     self.lines = src.splitlines()
     self.tree = ast.parse(src, path)
     self.hints: dict[tuple[int,int], list[tuple[str,str]]] = {}  # (line, byte_col) -> (label, other form), 1-indexed lines
-    self.use_names = True
     self.diags: list[dict] = []
     self.rets: set[tuple[int,int]] = set()
     self.sym: dict[int, str] = {}  # sentinel value -> dim name
@@ -83,7 +82,7 @@ class Analysis:
   def fmt(self, v, named:bool) -> str|None:
     if isinstance(v, Tensor):
       s = "(" + ", ".join(self.fmt_dim(d, named) for d in v.shape) + ("," if len(v.shape) == 1 else "") + ")"
-      return s if v.dtype == dtypes.default_float else f"{s} {v.dtype.name}"
+      return s if named or v.dtype == dtypes.default_float else f"{s} {v.dtype.name}"  # dtype only in the hover form
     if isinstance(v, (list, tuple)) and 0 < len(v) <= 4 and all(isinstance(x, Tensor) for x in v):
       inner = ", ".join(self.fmt(x, named) for x in v)
       return f"[{inner}]" if isinstance(v, list) else f"({inner})"
@@ -97,8 +96,8 @@ class Analysis:
     if self.names is None:  # module level, names aren't known yet. copy lists, they may be appended to later
       v = list(v) if isinstance(v, list) else v
       return self.deferred.append(lambda: self.add_hint(line, col, v, ret))
-    if self.foreign(line) or (s := self.fmt(v, self.use_names)) is None: return
-    s = (s, self.fmt(v, not self.use_names))
+    if self.foreign(line) or (s := self.fmt(v, True)) is None: return
+    s = (s, self.fmt(v, False))
     self.rets.add((line, col)) if ret else None
     labels = self.hints.setdefault((line, col), [])
     if s not in labels: labels.append(s)
@@ -211,9 +210,6 @@ class Analysis:
 
   def run_entry(self, cls:ast.ClassDef|None, fn:ast.FunctionDef, anns):
     shapes, dts, vals = {}, {}, {}
-    # with no declared shapes there's no style to follow, so use names
-    self.use_names = not any(kind == ".shape" for _, (_, kind, _) in anns) or any(isinstance(n, ast.Name) and type(self.g.get(n.id)) is int
-                         for l, (_, kind, expr) in anns if kind == ".shape" for n in ast.walk(ast.parse(expr, mode="eval")))
     for l, (name, kind, expr) in anns:
       try:
         v = self.eval_expr(expr)
@@ -311,8 +307,8 @@ class Analysis:
         c = list(v) if isinstance(v, list) else v
         self.deferred.append(lambda: rec(k, c)); return v
       if self.foreign(self.links[k][0]): return v
-      s = self.fmt(v, self.use_names)
-      item = (s, self.fmt(v, not self.use_names)) if pairs else s
+      s = self.fmt(v, True)
+      item = (s, self.fmt(v, False)) if pairs else s
       if (pairs and s is None) or item in (seen := store.setdefault(k, [])): return v
       seen.append(item)
       return v
@@ -352,9 +348,10 @@ class Analysis:
     hints = []
     for (line, col), labels in sorted(self.hints.items()):
       text = self.lines[line-1] if line-1 < len(self.lines) else ""
-      join = lambda xs: " | ".join(xs[:3]) + (" | …" if len(xs) > 3 else "")
-      main, alt = join([a for a, _ in labels]), join([b for _, b in labels])
-      hints.append({"line": line-1, "character": utf16_col(text, col), "label": main, "tooltip": alt if alt != main else None, "ret": (line, col) in self.rets})
+      # a line that ran with several shapes (loops, several callers) shows the first, the rest are in the tooltip
+      (main, raw), rest = labels[0], [p for p in labels[1:] if p[0] != labels[0][0]]
+      tip = "\n".join(([raw] if raw != main else []) + ([f"also {a}" for a, _ in rest[:3]] + (["…"] if len(rest) > 3 else [])))
+      hints.append({"line": line-1, "character": utf16_col(text, col), "label": main, "tooltip": tip or None, "ret": (line, col) in self.rets})
     return {"hints": hints, "diagnostics": [d | {"line": d["line"]-1} for d in self.diags]}
 
 if __name__ == "__main__":
