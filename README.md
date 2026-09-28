@@ -5,21 +5,21 @@ A language server that shows [tinygrad](https://github.com/tinygrad/tinygrad) te
 ```python
 class Mlp:
   def __call__(self, x: Tensor) -> Tensor:
-    # x.shape = (BS, 1, emb_dim)
-    gate: (BS, 1, mlp_size) = self.gate_proj(x).silu()
-    up: (BS, 1, mlp_size) = self.up_proj(x)
-    return self.down_proj(gate*up) -> (BS, 1, emb_dim)
+    # x.shape = (1, 1, emb_dim)
+    gate: (1, 1, 17408) = self.gate_proj(x).silu()
+    up: (1, 1, 17408) = self.up_proj(x)
+    return self.down_proj(gate*up) -> (1, 1, 5120)
 ```
 
 Chained calls get a hint after each link that changes the shape, so you can follow the transform without assigning intermediates. Each shape appears once, right after the step that produced it; the final shape is on the variable:
 
 ```python
-    q: (BS, n_heads, T, head_dim) = x.reshape(B, T, n_heads, head_dim): (BS, T, n_heads, head_dim).transpose(1, 2): (BS, n_heads, T, head_dim).contiguous()
+    q: (1, 24, 3, 256) = x.reshape(B, T, n_heads, head_dim): (1, 3, 24, 256).transpose(1, 2): (1, 24, 3, 256).contiguous()
 ```
 
 `return a, b` gets a hint after each element instead of one for the whole tuple.
 
-Shape errors show up as diagnostics on the failing line, e.g. `cannot dot (BS, T, 64) and (BS, 4, T, 16)`.
+Shape errors show up as diagnostics on the failing line, e.g. `cannot dot (1, 3, 64) and (1, 4, 3, 16)`.
 
 ## How it works
 
@@ -29,7 +29,7 @@ tinyshape doesn't reimplement tinygrad's shape rules. It runs your code:
 - Each annotated function is called with `Tensor.empty` inputs of the declared shape.
 - `sys.settrace` records the shape of every tensor assigned or returned in your file. That includes lines reached through other functions and classes, e.g. an `Mlp` called from an annotated `Block`.
 
-Symbolic dims like `BS` are stand-in prime numbers during the run, and are turned back into names for display. A small file with a transformer block takes about 0.1s per analysis.
+Shape comments must resolve to concrete non-negative integers. You can use numeric literals, expressions, or defined module globals; undefined names produce a diagnostic on the comment. A small file with a transformer block takes about 0.1s per analysis.
 
 ## Annotations
 
@@ -37,7 +37,7 @@ Put these comments at the top of a function body:
 
 | comment | meaning |
 |---|---|
-| `# x.shape = (BS, T, emb_dim)` | Input shape. Names that aren't module globals become symbolic dims. |
+| `# x.shape = (1, 3, emb_dim)` | Input shape. Every dimension must resolve to a concrete integer; names must be defined. |
 | `# x.dtype = dtypes.int` | Input dtype. Usually not needed: inputs are float, and if the call fails they're retried as int, e.g. token ids into `nn.Embedding`. |
 | `# start_pos = 0` | Value for a non-tensor parameter. |
 | `# self = Block(3)` | How to build `self`. The default is `Cls()`, then `Cls(0, 0, ...)`. |
@@ -49,7 +49,7 @@ A `-> Tensor` function whose body is only `pass` or `...` returns its first `Ten
 
 Dims are printed the same way everywhere:
 
-- Dims are numbers, e.g. `(1, 1, 17408)`, since the code already says which globals they come from. Symbolic dims keep their names: `(BS, T, 5120)`.
+- Dims are numbers, e.g. `(1, 1, 17408)`, since the code already says which globals they come from.
 - Hovering a hint shows a dim by name when exactly one module-level int has its value, e.g. `(1, 1, mlp_size)`, plus the dtype if it isn't the default float.
 - If a line runs with several shapes (loops, several callers), the hint shows the first and the hover lists the others.
 

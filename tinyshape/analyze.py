@@ -3,7 +3,7 @@
 #
 # entry points are functions whose leading comments declare input shapes:
 #   def __call__(self, x: Tensor, start_pos: int) -> Tensor:
-#     # x.shape = (BS, T, emb_dim)        names that aren't module globals become symbolic dims
+#     # x.shape = (1, 3, emb_dim)         all dimensions must resolve to concrete integers
 #                                         hints show numbers, the hover shows a dim by global name if exactly one global has its value
 #     # x.dtype = dtypes.int              optional, default float with an int retry if the call fails
 #     # start_pos = 0                     plain values for non-tensor params, int/float/bool ones default to 0
@@ -47,8 +47,6 @@ class Analysis:
     self.hints: dict[tuple[int,int], list[tuple[str,str]]] = {}  # (line, byte_col) -> (label, other form), 1-indexed lines
     self.diags: list[dict] = []
     self.rets: set[tuple[int,int]] = set()
-    self.sym: dict[int, str] = {}  # sentinel value -> dim name
-    self.next_sentinel = 10007
     self.linemap: dict[int, ast.stmt] = {}
     self.spans: list[tuple[int,int]] = []  # line ranges of entry points
     self.cur: tuple[int,int]|None = None  # span of the entry being run
@@ -69,19 +67,7 @@ class Analysis:
 
   def fmt_dim(self, d, named:bool) -> str:
     if not isinstance(d, int): return str(d)
-    names, rest = [], d
-    for s, n in self.sym.items():
-      while rest and rest % s == 0: names.append(n); rest //= s
-    if not names and (off := self.offset_dim(d)): return off
-    if rest != 1 or not names: names.append(self.names.get(rest, str(rest)) if named else str(rest))
-    return "*".join(names)
-
-  def offset_dim(self, d:int) -> str|None:
-    # k*T + c for small k and c, e.g. after pad or cat. sentinels are spaced so this is unambiguous
-    for s, n in self.sym.items():
-      for k in range(1, 9):
-        if 0 < abs(c := d - k*s) <= 64: return f"{n if k == 1 else f'{k}*{n}'}{c:+d}"
-    return None
+    return self.names.get(d, str(d)) if named else str(d)
 
   def fmt(self, v, named:bool, dtype:bool=False) -> str|None:
     if isinstance(v, Tensor):
@@ -165,31 +151,12 @@ class Analysis:
     for fs in traceback.extract_tb(e.__traceback__):
       if fs.filename == self.path and fs.lineno and not self.foreign(fs.lineno): line = fs.lineno
     msg = f"{type(e).__name__}: {e}".strip()
-    used = []
-    for s, n in self.sym.items():
-      msg, k = re.subn(rf"\b{s}\b", n, msg)
-      if k: used.append(f"{n}={s}")
-    # a symbolic dim is a big stand-in number, which overruns fixed-size tables like rope or a kv cache
-    if used: msg += (f" ({used[0]} is a stand-in for an unknown size; if it indexes" if len(used) == 1 else
-                     f" ({', '.join(used)} are stand-ins for unknown sizes; if one indexes") + " a fixed-size table, give it a number in the shape comment)"
     self.diag(line, prefix + msg)
 
   # ---- entry points ----
   def eval_expr(self, expr:str, extra:dict|None=None):
     g = {"Tensor": Tensor, "dtypes": dtypes} | self.g  # usable in annotations even if the file doesn't import them
-    class Syms(dict):
-      def __missing__(s, k):
-        if k in g or hasattr(builtins, k): raise KeyError(k)
-        for v, n in self.sym.items():
-          if n == k: return v
-        def ok(v): return (v not in self.names and all(v % p for p in range(2, 101)) and
-                           all(abs(k*v - j*u) > 200 for u in self.sym for k in range(1, 9) for j in range(1, 9)))
-        while not ok(self.next_sentinel): self.next_sentinel += 1
-        v = self.next_sentinel; self.next_sentinel += 1
-        self.sym[v] = k
-        return v
-    ns = Syms(extra or {})
-    return eval(expr, g, ns)
+    return eval(expr, g, extra or {})
 
   def comments(self) -> dict[int, str]:
     out = {}
@@ -218,7 +185,11 @@ class Analysis:
     for l, (name, kind, expr) in anns:
       try:
         v = self.eval_expr(expr)
-        if kind == ".shape": shapes[name] = tuple(v) if isinstance(v, (tuple, list)) else (v,)
+        if kind == ".shape":
+          shape = tuple(v) if isinstance(v, (tuple, list)) else (v,)
+          if any(type(d) is not int or d < 0 for d in shape):
+            raise ValueError("shape dimensions must be concrete non-negative integers")
+          shapes[name] = shape
         elif kind == ".dtype": dts[name] = v
         else: vals[name] = v
       except Exception as e: return self.diag(l, f"tinyshape: can't evaluate `{expr}`: {e}")
