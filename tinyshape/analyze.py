@@ -10,7 +10,7 @@
 #     # self = Block(3)                   optional, default is Class() or Class(0, 0, ...)
 #   def rope_table():
 #     # tinyshape: run                    run a function that has no shapes to declare
-import ast, copy, io, json, os, sys, tokenize, re, inspect, builtins, traceback
+import ast, copy, functools, io, json, os, sys, sysconfig, tokenize, re, inspect, builtins, traceback, types
 os.environ.setdefault("DEV", "NULL")
 
 real_stdout = sys.stdout
@@ -22,6 +22,7 @@ except ModuleNotFoundError as e:
   real_stdout.write(json.dumps({"missing_tinygrad": True, "python": sys.executable}))
   sys.exit(0)
 from tinygrad.helpers import argfix
+from tinygrad.dtype import DType
 
 # random init builds and realizes an rng graph per tensor (most of the time for a big model's __init__), but only
 # shapes matter here, so every random constructor makes an empty tensor instead
@@ -32,7 +33,48 @@ for _n in ["rand", "randn", "uniform", "normal", "scaled_uniform", "glorot_unifo
   setattr(Tensor, _n, _empty_like_rand(dtypes.default_float))
 Tensor.randint = _empty_like_rand(dtypes.int32)
 
+# realize and assign never change a shape, but each one schedules and walks the graph of every live tensor. mid forward pass
+# that's every earlier layer, so a model that realizes its caches in every layer gets quadratically slower. both are skipped:
+# assign keeps its checks (the value broadcasts to the target, dtypes match) and the target keeps its old value
+def _realize(self, *lst, **_): return self
+def _assign(self, x):
+  if not isinstance(x, Tensor): x = Tensor(x, dtype=self.dtype)
+  x = x._broadcast_to(self.shape)
+  if x.dtype != self.dtype and x.dtype not in getattr(dtypes, "weaks", ()): raise RuntimeError(f"assign dtype mismatch {self.dtype} != {x.dtype}")
+  return self
+Tensor.realize, Tensor.assign = _realize, _assign
+
 ANN_RE = re.compile(r"#\s*([A-Za-z_]\w*)(\.shape|\.dtype)?\s*=\s*(.+?)\s*$")
+# ---- skipping repeated calls ----
+# a model calls the same code over and over with the same shapes, e.g. 64 blocks in a loop. within one entry point's run,
+# a call to a function from the analyzed file runs once per distinct key: the function, the shapes/dtypes of tensor args,
+# the values of plain args, and the same for everything on `self` (weights, flags like use_full_attn, sublayers). a repeat
+# skips the body, whose hints the first call already recorded, and returns fresh empty tensors of the remembered shapes.
+# only calls that return tensors are skipped, so side effect calls like __init__ always run
+PRIMS = (type(None), bool, int, float, complex, str, bytes)
+BY_ID = (type, types.ModuleType, types.FunctionType, types.BuiltinFunctionType, types.MethodType, types.BuiltinMethodType, DType)
+
+def call_key(v, seen:tuple=()):
+  if isinstance(v, Tensor):
+    if not isinstance(v.device, str): raise TypeError("multi device tensor")
+    return ("T", v.shape, v.dtype, v.device)
+  if isinstance(v, PRIMS): return (type(v), v)
+  if type(v) in (tuple, list): return (type(v), *(call_key(x, seen) for x in v))
+  if type(v) is dict: return (dict, *((call_key(k, seen), call_key(x, seen)) for k, x in v.items()))
+  if isinstance(v, BY_ID): return v
+  if hasattr(v, "__dict__"):
+    if id(v) in seen: return ("cycle", type(v))
+    return (type(v), *((k, call_key(x, seen + (id(v),))) for k, x in vars(v).items()))
+  raise TypeError(f"no key for {type(v).__name__}")
+
+def has_tensor(v) -> bool:
+  if isinstance(v, Tensor): return isinstance(v.device, str)
+  return type(v) in (tuple, list) and any(map(has_tensor, v)) and all(has_tensor(x) or isinstance(x, PRIMS) for x in v)
+
+def fresh(v):
+  if isinstance(v, Tensor): return Tensor.empty(*v.shape, dtype=v.dtype, device=v.device)
+  return type(v)(fresh(x) for x in v) if type(v) in (tuple, list) else v
+
 RUN_RE = re.compile(r"#\s*tinyshape:\s*run\b")
 
 def utf16_col(line:str, byte_col:int) -> int:
@@ -180,7 +222,27 @@ class Analysis:
         anns = [(l, g) for l, g in anns if g[0] in params]
         if any(g[1] == ".shape" for _, g in anns) or any(RUN_RE.match(c) for _, c in lead): yield cls, fn, anns
 
+  def skip_repeats(self):
+    self.memo: dict = {}
+    def wrap(fn):
+      @functools.wraps(fn)
+      def w(*args, **kwargs):
+        try: key = (fn, call_key(args), call_key(kwargs))
+        except TypeError: return fn(*args, **kwargs)
+        if key in self.memo: return fresh(self.memo[key])
+        out = fn(*args, **kwargs)
+        if has_tensor(out): self.memo[key] = out
+        return out
+      return w
+    def mine(f): return isinstance(f, types.FunctionType) and f.__code__.co_filename == self.path and not (inspect.isgeneratorfunction(f) or inspect.iscoroutinefunction(f))
+    for name, v in list(self.g.items()):
+      if mine(v): self.g[name] = wrap(v)
+      elif isinstance(v, type):
+        for k, f in list(vars(v).items()):
+          if k != "__init__" and mine(f): setattr(v, k, wrap(f))
+
   def run_entry(self, cls:ast.ClassDef|None, fn:ast.FunctionDef, anns):
+    self.memo.clear()  # an entry point's hints come from its own run
     shapes, dts, vals = {}, {}, {}
     for l, (name, kind, expr) in anns:
       try:
@@ -332,6 +394,7 @@ class Analysis:
       except Exception as e: self.report_exc(e, st.lineno, "tinyshape (module level): ")
     self.names = self.dim_names()
     for f in self.deferred: f()
+    self.skip_repeats()
     for cls, fn, anns in entries:
       self.cur = (fn.lineno, fn.end_lineno)
       self.run_entry(cls, fn, anns)
@@ -346,11 +409,22 @@ class Analysis:
       hints.append({"line": line-1, "character": utf16_col(text, col), "label": main, "tooltip": tip or None, "ret": (line, col) in self.rets})
     return {"hints": hints, "diagnostics": [d | {"line": d["line"]-1} for d in self.diags]}
 
+def deps(skip:set[str]) -> list[list]:
+  # every non-stdlib file this run imported (tinygrad, the user's own modules), so the server's cache can tell when one changed
+  stdlib, out = sysconfig.get_paths()["stdlib"], []
+  for m in list(sys.modules.values()):
+    if not (f := getattr(m, "__file__", None)) or f.startswith(stdlib) or (f := os.path.abspath(f)) in skip: continue
+    try: st = os.stat(f)
+    except OSError: continue
+    out.append([f, st.st_mtime_ns, st.st_size])
+  return sorted(out)
+
 if __name__ == "__main__":
   path = os.path.abspath(sys.argv[1])
   src = sys.stdin.read()
   try: out = Analysis(path, src).run()
   except SyntaxError: out = {"hints": [], "diagnostics": [], "syntax_error": True}
+  out["deps"] = deps({path, os.path.abspath(__file__)})
   real_stdout.write(json.dumps(out))
   real_stdout.flush()
   os._exit(0)

@@ -60,6 +60,59 @@ def reshape(x):
         self.assertEqual(result["diagnostics"], [])
         self.assertEqual(result["hints"][0]["label"], label)
 
+  def test_realize_and_assign_are_skipped_but_checked(self):
+    result = analyze("""from tinygrad import Tensor, dtypes
+def ok(x):
+  # x.shape = (2, 3)
+  cache = Tensor.zeros(4, 3).contiguous().realize()
+  cache[:2].assign(x)
+  cache.assign(1.0)
+  return cache
+def bad_shape(x):
+  # x.shape = (2, 3)
+  Tensor.zeros(2, 4).realize().assign(x)
+def bad_dtype(x):
+  # x.shape = (2, 3)
+  Tensor.zeros(2, 3, dtype=dtypes.half).assign(x)
+""")
+    self.assertIn("(4, 3)", [h["label"] for h in result["hints"]])
+    self.assertEqual(sorted(d["line"] for d in result["diagnostics"]), [9, 12])
+    self.assertIn("dtype mismatch", result["diagnostics"][-1]["message"])
+
+  def test_repeated_calls_keep_per_layer_differences(self):
+    # blocks 0-2 repeat, block 3 has a different flag, block 4 different weights; each one's output shape must still be right.
+    # the layer list is built with the same Mlp() call 5 times, so __init__ must not be skipped
+    result = analyze("""from tinygrad import Tensor, nn
+class Mlp:
+  def __init__(self, d): self.lin = nn.Linear(4, d)
+  def __call__(self, x): return self.lin(x)
+class Block:
+  def __init__(self, i): self.wide, self.mlp = i == 3, Mlp(6 if i == 4 else 4)
+  def __call__(self, x):
+    y = self.mlp(x)
+    return y.cat(y, dim=-1) if self.wide else y
+class Model:
+  def __init__(self): self.layers = [Block(i) for i in range(5)]
+  def __call__(self, x):
+    # x.shape = (2, 4)
+    outs = [layer(x) for layer in self.layers]
+    return outs[2], outs[3], outs[4]
+""")
+    self.assertEqual(result["diagnostics"], [])
+    self.assertEqual([h["label"] for h in result["hints"] if h["line"] == 14], ["(2, 4)", "(2, 8)", "(2, 6)"])
+
+  def test_repeated_call_with_new_shape_still_errors(self):
+    result = analyze("""from tinygrad import Tensor
+def f(x): return x.reshape(2, 3)
+def g(x, y):
+  # x.shape = (6,)
+  # y.shape = (6,)
+  a, b, c = f(x), f(y), f(x.cat(x))
+  return a
+""")
+    self.assertEqual(len(result["diagnostics"]), 1)
+    self.assertEqual(result["diagnostics"][0]["line"], 1)
+
 
 if __name__ == "__main__":
   unittest.main()

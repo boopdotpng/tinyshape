@@ -1,11 +1,15 @@
 # minimal stdio language server: inlay hints with tinygrad tensor shapes, diagnostics for shape errors.
 # the actual work happens in analyze.py, run in a fresh subprocess per edit (user code is executed!).
 # only files containing a `# <name>.shape = (...)` or `# tinyshape: run` comment are analyzed.
-import json, os, re, subprocess, sys, threading, urllib.parse
+# results are cached in ~/.cache/tinyshape, keyed on the source and settings, and checked against the files the run imported.
+import hashlib, json, os, re, subprocess, sys, threading, time, urllib.parse
 
 ANALYZE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "analyze.py")
 TRIGGER = re.compile(r"#\s*(\w+\.shape\s*=|tinyshape:\s*run\b)")
 DEBOUNCE, TIMEOUT = 0.3, 20.0
+CACHE_DIR = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "tinyshape")
+CACHE_MAX = 500  # entries, least recently used go first
+LOG_FILE, LOG_MAX = os.path.join(CACHE_DIR, "server.log"), 1 << 20
 
 out_lock = threading.Lock()
 docs: dict[str, str] = {}
@@ -13,7 +17,8 @@ results: dict[str, list[dict]] = {}
 gens: dict[str, int] = {}
 procs: dict[str, subprocess.Popen] = {}
 state_lock = threading.Lock()
-opts = {"python": None, "tinygradPath": None, "nameDims": True, "chainHints": True}
+opts = {"python": None, "tinygradPath": None, "nameDims": True, "chainHints": True, "cache": True}
+warned_outside: set[str] = set()
 warned_missing = False  # the missing-tinygrad notice is sent once per server
 client_refresh = False
 root: str|None = None  # zed runs one server per worktree and can send every server the same file, so each only takes its own
@@ -30,10 +35,46 @@ def request(method, params):
   global next_id
   next_id += 1
   send({"jsonrpc": "2.0", "id": f"ts{next_id}", "method": method, "params": params})
-def log(msg): notify("window/logMessage", {"type": 4, "message": f"tinyshape: {msg}"})
+def log(msg, client:bool=True):
+  # also to a file, so it can be read without the editor's lsp log panel
+  if client: notify("window/logMessage", {"type": 4, "message": f"tinyshape: {msg}"})
+  try:
+    with open(LOG_FILE, "a") as f: f.write(f"{time.strftime('%m-%d %H:%M:%S')} [{os.getpid()}] {msg}\n")
+  except OSError: pass
+
+# ---- cache ----
+def cache_key(path:str, src:str, python:str, env:dict) -> str:
+  st = os.stat(ANALYZE)
+  envs = {k: v for k, v in env.items() if k in ("DEV", "PYTHONPATH") or k.startswith("TINYSHAPE_")}
+  return hashlib.sha256(json.dumps([path, src, python, envs, st.st_mtime_ns, st.st_size]).encode()).hexdigest()
+
+def cache_get(key:str) -> dict|None:
+  f = os.path.join(CACHE_DIR, key + ".json")
+  try:
+    with open(f) as fh: res = json.load(fh)
+    for dep, mtime, size in res["deps"]:
+      st = os.stat(dep)
+      if (st.st_mtime_ns, st.st_size) != (mtime, size): return None
+    os.utime(f)  # mtime is the lru clock
+    return res
+  except (OSError, ValueError, KeyError, TypeError): return None
+
+def cache_put(key:str, res:dict):
+  try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    tmp = os.path.join(CACHE_DIR, f".{key}.{os.getpid()}.tmp")
+    with open(tmp, "w") as fh: json.dump(res, fh)
+    os.replace(tmp, os.path.join(CACHE_DIR, key + ".json"))
+    entries = [e for e in os.scandir(CACHE_DIR) if e.name.endswith(".json")]
+    if len(entries) > CACHE_MAX:
+      for e in sorted(entries, key=lambda e: e.stat().st_mtime)[:len(entries) - CACHE_MAX]: os.remove(e.path)
+  except OSError as e: log(f"cache write failed: {e}")
 
 def uri_path(uri:str) -> str: return urllib.parse.unquote(urllib.parse.urlparse(uri).path)
-def owned(uri:str) -> bool: return root is None or (uri_path(uri) + os.sep).startswith(root + os.sep)
+def owned(uri:str) -> bool:
+  if root is None or (uri_path(uri) + os.sep).startswith(root + os.sep): return True
+  if uri not in warned_outside: warned_outside.add(uri); log(f"ignoring {uri_path(uri)}, outside root {root}", client=False)
+  return False
 
 def publish(uri, hints, diags):
   with state_lock: results[uri] = hints
@@ -52,11 +93,20 @@ def analyze(uri:str, gen:int):
     if not TRIGGER.search(src):
       if results.pop(uri, None) is not None: publish(uri, [], [])
       return
-    path = uri_path(uri)
+    path, python = uri_path(uri), find_python(uri_path(uri))
     env = os.environ | {"DEV": "NULL", "TINYSHAPE_NAME_DIMS": "1" if opts["nameDims"] else "0",
                          "TINYSHAPE_CHAIN_HINTS": "1" if opts["chainHints"] else "0"}
     if (tg := tinygrad_root()): env["PYTHONPATH"] = os.pathsep.join(filter(None, [tg, env.get("PYTHONPATH")]))
-    p = subprocess.Popen([find_python(path), ANALYZE, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+  key = cache_key(path, src, python, env) if opts["cache"] else None
+  if key and (res := cache_get(key)) is not None:
+    with state_lock:
+      if gens.get(uri) != gen: return
+    log(f"{path}: {len(res['hints'])} hints, {len(res['diagnostics'])} diagnostics (cached)")
+    return publish(uri, res["hints"], res["diagnostics"])
+  with state_lock:
+    if gens.get(uri) != gen: return
+    t0 = time.monotonic()
+    p = subprocess.Popen([python, ANALYZE, path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                          cwd=os.path.dirname(path), env=env)
     procs[uri] = p
   try: stdout, stderr = p.communicate(src.encode(), timeout=TIMEOUT)
@@ -70,6 +120,8 @@ def analyze(uri:str, gen:int):
   except json.JSONDecodeError: return log(f"analysis failed (exit {p.returncode}):\n{stderr.decode(errors='replace')[-4000:]}")
   if res.get("syntax_error"): return  # keep old hints while typing
   if res.get("missing_tinygrad"): return missing_tinygrad(res["python"])
+  if key: cache_put(key, res)
+  log(f"{path}: {len(res['hints'])} hints, {len(res['diagnostics'])} diagnostics in {time.monotonic() - t0:.2f}s")
   publish(uri, res["hints"], res["diagnostics"])
 
 def tinygrad_root() -> str|None:
@@ -102,8 +154,9 @@ def schedule(uri:str):
   threading.Thread(target=analyze, args=(uri, gen), daemon=True).start()
 
 def inlay_hints(params):
-  r = params["range"]
-  with state_lock: hints = results.get(params["textDocument"]["uri"], [])
+  r, uri = params["range"], params["textDocument"]["uri"]
+  with state_lock: hints = results.get(uri, [])
+  log(f"inlayHint {uri_path(uri)} lines {r['start']['line']}-{r['end']['line']}: {sum(r['start']['line'] <= h['line'] <= r['end']['line'] for h in hints)} of {len(hints)}", client=False)
   return [{"position": {"line": h["line"], "character": h["character"]}, "label": f"{' -> ' if h.get('ret') else ': '}{h['label']}", "kind": 1, "paddingLeft": False} | ({"tooltip": h["tooltip"]} if h.get("tooltip") else {})
           for h in hints if r["start"]["line"] <= h["line"] <= r["end"]["line"]]
 
@@ -136,6 +189,10 @@ def handle(msg:dict):
   if mid is not None: send({"jsonrpc": "2.0", "id": mid, "result": result})
 
 def main():
+  try:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    if os.path.getsize(LOG_FILE) > LOG_MAX: os.replace(LOG_FILE, LOG_FILE + ".old")
+  except OSError: pass
   stdin = sys.stdin.buffer
   while True:
     headers = {}

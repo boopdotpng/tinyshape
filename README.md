@@ -57,6 +57,8 @@ Dims are printed the same way everywhere:
 
 - **It runs your code.** Module-level code runs on every edit, with `__name__ != "__main__"`. Only files containing a `# name.shape =` or `# tinyshape: run` comment are analyzed, and each run has a 20s timeout.
 - **Only the branch that ran is seen.** Shapes come from one real run, so a different branch can give different shapes.
+- **Repeated calls are skipped.** In one run, a function from your file that returns tensors runs once per distinct call: same function, same argument shapes and values, same weights and settings on `self`. Repeats, like the same block 64 times in a loop, return empty tensors of the remembered shapes. Calls that only have side effects, like `__init__`, always run. A function whose output shape depends on something outside its arguments and `self`, like a global that changes during the run, could get a stale shape. `realize()` and `assign()` are skipped too, since they never change shapes; `assign` still checks the value against the target.
+- **Results are cached** in `~/.cache/tinyshape` (or `$XDG_CACHE_HOME/tinyshape`), keyed on the file's text, the settings and `analyze.py`. An entry is dropped when any Python file the run imported changes, e.g. tinygrad or your own modules. Other files your code reads at import time, like a `config.json`, aren't tracked; set `"cache": false` if shapes depend on them. The server also logs to `server.log` there.
 - **Tensors only.** Hints are shown for tensors and for small lists or tuples of tensors.
 
 ## Zed
@@ -75,7 +77,8 @@ Dims are printed the same way everywhere:
       "tinygradPath": "/path/to/tinygrad",               // optional, a tinygrad git clone, if it isn't pip installed
       "server": "/path/to/tinyshape/tinyshape/server.py", // optional, run the checkout instead of the embedded copy
       "nameDims": true,                                  // optional, false never shows global names
-      "chainHints": true                                 // optional, false hides hints inside method chains
+      "chainHints": true,                                // optional, false hides hints inside method chains
+      "cache": true                                      // optional, false always re-runs the analysis
     }
   }
 }
